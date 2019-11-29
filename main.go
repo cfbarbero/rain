@@ -15,25 +15,22 @@
 package main
 
 import (
-	"fmt"
-	"os"
-
 	"github.com/aws-cloudformation/rain/cmd"
-	"github.com/aws-cloudformation/rain/console/spinner"
-	"github.com/aws-cloudformation/rain/console/text"
 )
 
 func main() {
-	defer func() {
-		spinner.Stop()
+	/*
+		defer func() {
+			spinner.Stop()
 
-		if r := recover(); r != nil {
-			fmt.Println(text.Red(fmt.Sprint(r)))
-			os.Exit(1)
-		}
+			if r := recover(); r != nil {
+				fmt.Println(text.Red(fmt.Sprint(r)))
+				os.Exit(1)
+			}
 
-		os.Exit(0)
-	}()
+			os.Exit(0)
+		}()
+	*/
 
 	cmd.Execute()
 }
