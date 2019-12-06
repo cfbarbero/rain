@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io/ioutil"
@@ -22,6 +23,12 @@ import (
 
 var force = false
 var tags []string
+var configFile string
+
+type cfnConfig struct {
+	Parameters map[string]string
+	Tags       map[string]string
+}
 
 func formatChangeSet(changes []cloudformation.Change) string {
 	out := strings.Builder{}
@@ -45,68 +52,150 @@ func formatChangeSet(changes []cloudformation.Change) string {
 	return out.String()
 }
 
+func parseConfigFile() cfnConfig {
+	fmt.Printf("Using parameters from %s\n", configFile)
+
+	// Open our jsonFile
+	jsonFile, err := os.Open(configFile)
+	// if we os.Open returns an error then handle it
+	if err != nil {
+		fmt.Println(err)
+	}
+
+	fmt.Println("Successfully Opened users.json")
+	// defer the closing of our jsonFile so that we can parse it later on
+	defer jsonFile.Close()
+
+	// read our opened xmlFile as a byte array.
+	byteValue, _ := ioutil.ReadAll(jsonFile)
+
+	configData := cfnConfig{}
+	json.Unmarshal(byteValue, &configData)
+
+	return configData
+}
+
 func getParameters(t string, old []cloudformation.Parameter, forceOldValue bool) []cloudformation.Parameter {
 	newParams := make([]cloudformation.Parameter, 0)
-
 	template, err := parse.String(t)
 	if err != nil {
 		panic(fmt.Errorf("Unable to parse template: %s", err))
 	}
 
-	oldMap := make(map[string]cloudformation.Parameter)
-	for _, param := range old {
-		oldMap[*param.ParameterKey] = param
-	}
-
 	if params, ok := template.Map()["Parameters"]; ok {
-		for k, p := range params.(map[string]interface{}) {
-			// New variable so we don't mess up the pointers below
-			key := k
+		if len(configFile) > 0 {
+			configData := parseConfigFile()
 
-			extra := ""
-			param := p.(map[string]interface{})
+			for k := range params.(map[string]interface{}) {
+				// New variable so we don't mess up the pointers below
+				key := k
 
-			hasExisting := false
-
-			value := ""
-
-			if oldParam, ok := oldMap[key]; ok {
-				extra = fmt.Sprintf(" (existing value: %s)", fmt.Sprint(*oldParam.ParameterValue))
-				hasExisting = true
-
-				if forceOldValue {
-					value = *oldParam.ParameterValue
+				if configParam, ok := configData.Parameters[key]; ok {
+					newParams = append(newParams, cloudformation.Parameter{
+						ParameterKey:   &key,
+						ParameterValue: &configParam,
+					})
+				} else {
+					panic(fmt.Errorf("When using --configFile flag you must supply all parameters in the configFile. Missing parameter '%s'.", key))
 				}
-			} else if defaultValue, ok := param["Default"]; ok {
-				extra = fmt.Sprintf(" (default value: %s)", fmt.Sprint(defaultValue))
 			}
 
-			if force {
-				panic(fmt.Errorf("Some parameters require values. Set defaults or deploy without the --force flag."))
+		} else {
+			oldMap := make(map[string]cloudformation.Parameter)
+			for _, param := range old {
+				oldMap[*param.ParameterKey] = param
 			}
+			for k, p := range params.(map[string]interface{}) {
+				// New variable so we don't mess up the pointers below
+				key := k
 
-			newValue := console.Ask(fmt.Sprintf("Enter a value for parameter '%s'%s:", key, extra))
+				extra := ""
+				param := p.(map[string]interface{})
 
-			if newValue != "" {
-				newParams = append(newParams, cloudformation.Parameter{
-					ParameterKey:   &key,
-					ParameterValue: &newValue,
-				})
-			} else if value != "" && forceOldValue {
-				newParams = append(newParams, cloudformation.Parameter{
-					ParameterKey:   &key,
-					ParameterValue: &value,
-				})
-			} else if hasExisting {
-				newParams = append(newParams, cloudformation.Parameter{
-					ParameterKey:     &key,
-					UsePreviousValue: &hasExisting,
-				})
+				hasExisting := false
+
+				value := ""
+
+				if oldParam, ok := oldMap[key]; ok {
+					extra = fmt.Sprintf(" (existing value: %s)", fmt.Sprint(*oldParam.ParameterValue))
+					hasExisting = true
+
+					if forceOldValue {
+						value = *oldParam.ParameterValue
+					}
+				} else if defaultValue, ok := param["Default"]; ok {
+					extra = fmt.Sprintf(" (default value: %s)", fmt.Sprint(defaultValue))
+				}
+
+				if force {
+					panic(fmt.Errorf("Some parameters require values. Set defaults or deploy without the --force flag."))
+				}
+
+				newValue := console.Ask(fmt.Sprintf("Enter a value for parameter '%s'%s:", key, extra))
+
+				if newValue != "" {
+					newParams = append(newParams, cloudformation.Parameter{
+						ParameterKey:   &key,
+						ParameterValue: &newValue,
+					})
+				} else if value != "" && forceOldValue {
+					newParams = append(newParams, cloudformation.Parameter{
+						ParameterKey:   &key,
+						ParameterValue: &value,
+					})
+				} else if hasExisting {
+					newParams = append(newParams, cloudformation.Parameter{
+						ParameterKey:     &key,
+						UsePreviousValue: &hasExisting,
+					})
+				}
 			}
 		}
 	}
 
 	return newParams
+}
+
+func diffChanges(oldTemplateString string, outputTemplateFile string, stack cloudformation.Stack) {
+	paramsDiffer := false
+	if len(configFile) > 0 {
+		// Only compare params if we have a config file
+		configParams := parseConfigFile().Parameters
+		oldParams := make(map[string]string, len(stack.Parameters))
+
+		for _, oldParam := range stack.Parameters {
+			oldParams[*oldParam.ParameterKey] = *oldParam.ParameterValue
+		}
+
+		paramsDiff := diff.New(oldParams, configParams)
+		paramsDiffer = paramsDiff.Mode() != diff.Unchanged
+
+		if paramsDiffer {
+			console.ClearLine()
+			if console.Confirm(true, fmt.Sprintf("Stack '%s' exists. Do you wish to compare the CloudFormation parameters?", *stack.StackName)) {
+				// ToDo: This isn't showing the diff
+				fmt.Print(colouriseDiff(paramsDiff, false))
+			}
+		}
+	}
+
+	oldTemplate, _ := parse.String(oldTemplateString)
+	newTemplate, _ := parse.File(outputTemplateFile)
+
+	templateDiff := oldTemplate.Diff(newTemplate)
+	templatesDiffer := templateDiff.Mode() != diff.Unchanged
+
+	if templatesDiffer {
+		console.ClearLine()
+		if console.Confirm(true, fmt.Sprintf("Stack '%s' exists. Do you wish to compare the CloudFormation templates?", *stack.StackName)) {
+			fmt.Print(colouriseDiff(templateDiff, false))
+		}
+	}
+
+	if !templatesDiffer && !paramsDiffer {
+		fmt.Println(text.Green("No changes to deploy!"))
+		return
+	}
 }
 
 var deployCmd = &cobra.Command{
@@ -204,20 +293,7 @@ var deployCmd = &cobra.Command{
 					panic(fmt.Errorf("Failed to get existing template for stack '%s': %s", stackName, err))
 				}
 
-				oldTemplate, _ := parse.String(oldTemplateString)
-				newTemplate, _ := parse.File(outputFn.Name())
-
-				d := oldTemplate.Diff(newTemplate)
-
-				if d.Mode() == diff.Unchanged {
-					fmt.Println(text.Green("No changes to deploy!"))
-					return
-				}
-
-				console.ClearLine()
-				if console.Confirm(true, fmt.Sprintf("Stack '%s' exists. Do you wish to compare the CloudFormation templates?", stackName)) {
-					fmt.Print(colouriseDiff(d, false))
-				}
+				diffChanges(oldTemplateString, outputFn.Name(), stack)
 			}
 		}
 
@@ -285,5 +361,6 @@ var deployCmd = &cobra.Command{
 func init() {
 	deployCmd.Flags().BoolVarP(&force, "force", "f", false, "Don't ask questions; just deploy.")
 	deployCmd.Flags().StringSliceVar(&tags, "tags", []string{}, "Add tags to the stack. Use the format key1=value1,key2=value2.")
+	deployCmd.Flags().StringVarP(&configFile, "config", "c", "", "ConfigFile")
 	Root.AddCommand(deployCmd)
 }
