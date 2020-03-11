@@ -22,6 +22,7 @@ import (
 
 var force = false
 var tags []string
+var configfile string
 
 func formatChangeSet(changes []cloudformation.Change) string {
 	out := strings.Builder{}
@@ -285,5 +286,6 @@ var deployCmd = &cobra.Command{
 func init() {
 	deployCmd.Flags().BoolVarP(&force, "force", "f", false, "Don't ask questions; just deploy.")
 	deployCmd.Flags().StringSliceVar(&tags, "tags", []string{}, "Add tags to the stack. Use the format key1=value1,key2=value2.")
+	deployCmd.Flags().StringVarP(&configfile, "config", "c", "", "config file")
 	Root.AddCommand(deployCmd)
 }
